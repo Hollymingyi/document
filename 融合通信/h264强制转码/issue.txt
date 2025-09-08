@@ -1,0 +1,16 @@
+1 解决deadlock
+	把switch_core_io.c 415行switch_core_session_read_frame函数和
+	switch_core_media.c 15950行switch_core_session_write_frame函数
+	里面同步消息switch_core_session_receive_message改成异步消息switch_core_session_queue_message。
+	//switch_core_session_message_t msg = { 0 };
+	//msg.message_id = SWITCH_MESSAGE_INDICATE_TRANSCODING_NECESSARY;
+	//switch_core_session_receive_message(session, &msg);
+	
+	==>
+	
+	switch_core_session_message_t *msg = switch_core_session_alloc(session, sizeof(*msg));
+	msg->message_id = SWITCH_MESSAGE_INDICATE_TRANSCODING_NECESSARY;
+	MESSAGE_STAMP_FFL(msg);
+	switch_core_session_queue_message(session, msg);
+	
+	./configure CFLAGS=-DSWITCH_DEBUG_RWLOCKS跟踪死锁

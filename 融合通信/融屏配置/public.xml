@@ -1,0 +1,164 @@
+<!--
+    NOTICE:
+
+    This context is usually accessed via the external sip profile listening on port 5080.
+    
+    It is recommended to have separate inbound and outbound contexts.  Not only for security
+    but clearing up why you would need to do such a thing.  You don't want outside un-authenticated
+    callers hitting your default context which allows dialing calls thru your providers and results 
+    in Toll Fraud.
+-->
+
+<!-- http://wiki.freeswitch.org/wiki/Dialplan_XML -->
+<include>
+  <context name="public">
+
+    <extension name="unloop">
+      <condition field="${unroll_loops}" expression="^true$"/>
+      <condition field="${sip_looped_call}" expression="^true$">
+	<action application="deflect" data="${destination_number}"/>
+      </condition>
+    </extension>
+    <extension name="nb_conferences">
+      <condition field="destination_number" expression="^a(\d{8})$">
+	<action application="answer"/>
+        <action application="conference" data="$1@video-mcu-stereo-320"/>
+      </condition>
+    </extension>
+
+    <extension name="nb_conferences">
+      <condition field="destination_number" expression="^(30\d{2})$">
+        <action application="answer"/>
+        <action application="conference" data="$1-${domain_name}@default"/>
+      </condition>
+    </extension>
+
+    <extension name="wb_conferences">
+      <condition field="destination_number" expression="^(31\d{2})$">
+        <action application="answer"/>
+        <action application="conference" data="$1-${domain_name}@wideband"/>
+      </condition>
+    </extension>
+
+    <extension name="uwb_conferences">
+      <condition field="destination_number" expression="^(32\d{2})$">
+        <action application="answer"/>
+        <action application="conference" data="$1-${domain_name}@ultrawideband"/>
+      </condition>
+    </extension>
+    <!-- MONO 48kHz conferences -->
+    <extension name="cdquality_conferences">
+      <condition field="destination_number" expression="^(33\d{2})$">
+        <action application="answer"/>
+        <action application="conference" data="$1-${domain_name}@cdquality"/>
+      </condition>
+    </extension>
+
+
+    <!--
+	Tag anything pass thru here as an outside_call so you can make sure not
+	to create any routing loops based on the conditions that it came from 
+	the outside of the switch.  
+    -->
+    <extension name="outside_call" continue="true">
+      <condition>
+	<action application="set" data="outside_call=true"/>
+	<action application="export" data="RFC2822_DATE=${strftime(%a, %d %b %Y %T %z)}"/>
+      </condition>
+    </extension>
+
+    <extension name="call_debug" continue="true">
+      <condition field="${call_debug}" expression="^true$" break="never">
+	<action application="info"/>
+      </condition>
+    </extension>
+
+    <extension name="public_extensions">
+      <condition field="destination_number" expression="^(10[01][0-9])$">
+	<action application="transfer" data="$1 XML default"/>
+      </condition>
+    </extension>
+
+    <extension name="public_conference_extensions">
+      <condition field="destination_number" expression="^(3[5-8][01][0-9])$">
+	<action application="transfer" data="$1 XML default"/>
+      </condition>
+    </extension>
+
+    <!--
+	You can place files in the public directory to get included.
+    -->
+    <X-PRE-PROCESS cmd="include" data="public/*.xml"/>
+    <!--
+	If you have made it this far lets challenge the caller and if they authenticate
+	lets try what they dialed in the default context. (commented out by default)
+    -->
+    <!--
+    <extension name="check_auth" continue="true">
+      <condition field="${sip_authorized}" expression="^true$" break="never">
+	<anti-action application="respond" data="407"/>
+      </condition>
+    </extension>
+    
+    <extension name="transfer_to_default">
+      <condition>
+	<action application="transfer" data="${destination_number} XML default"/>
+      </condition>
+    </extension>
+    -->
+    <extension name="xswitch">
+      <condition field="destination_number" expression="^10086$">
+	<action application="answer"/>
+        <action application="lua" data="ivvr_demo.lua"/>
+      </condition>
+    </extension>
+    <extension name="10000">
+      <condition field="destination_number" expression="^10011$">
+	      <action application="playback" data="local_stream://moh"/>
+      </condition>
+    </extension>
+
+    <extension name="play_and_detect_speech example">
+	    <condition field="destination_number" expression="^99(\d{4})$">
+        <action application="lua" data="mp4.lua $1"/>
+      </condition>
+    </extension>
+
+    <extension name="inbound2lk">
+      <condition field="destination_number" expression="^(.+)2589650165$">
+	      <!--<action application="socket" data="10.2.9.217:9999 async full"/>-->
+	      <action application="answer"/>
+	      <action application="lua" data="spkfivvr2.lua"/>
+	      <!--<action application="park"/>-->
+	      <!--<action application="playback" data="av:///usr/local/freeswitch/output.mp4"/>-->
+	      <!--<action application="transfer" data="3800 XML default"/>-->
+	      <!--<action application="bridge" data="user/1001"/>-->
+	      <!-- <action application="lua" data="ivvr_demo.lua"/>-->
+      </condition>
+    </extension>
+
+    <extension name="mix2lk">
+	    <condition field="destination_number" expression="^0(\d{8})$">
+	<!--action application="export" data="nolocal:absolute_codec_string=PCMA,H264"/-->
+	<action application="lua" data="mix2lk.lua $1"/>
+	<!--<action application="bridge" data="{origination_caller_id_number=89650050}sofia/external/$1@10.2.15.192:5060"/>-->
+      </condition>
+    </extension>
+    <extension name="tosbc">
+      <condition field="destination_number" expression="^9(\d{11,12})$">
+        <action application="export" data="nolocal:absolute_codec_string=PCMU,PCMA,H264"/>
+        <action application="set" data="jitterbuffer_msec=60:200:20"/>
+        <action application="bridge" data="{origination_caller_id_number=89650165,ignore_early_media=true,rtp_force_video_fmtp=profile-level-id=42001f;packetization-mode=1;level-asymmetry-allowed=1;max-mbps=90000;max-fs=9000}sofia/external/$1@180.106.81.92:15080"/>
+      </condition>
+    </extension>
+
+    <extension name="outbound2lk">
+            <condition field="destination_number" expression="^9(\d{8})$">
+        <!--action application="export" data="nolocal:absolute_codec_string=PCMA,H264"/-->
+        <action application="lua" data="outbound2lk.lua $1"/>
+        <!--<action application="bridge" data="{origination_caller_id_number=89650050}sofia/external/$1@10.2.15.192:5060"/>-->
+      </condition>
+    </extension>
+
+  </context>
+</include>
