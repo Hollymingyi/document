@@ -1,0 +1,2 @@
+HMSET subscriber:entry::1001:guangting.com username 1001 domain guangting.com password test1234 ha1 04a2282d86460097f1c781a4d6af9253 ha1b 85e3bc5dac87146cc96a526a95a90644 rpid ""
+HMSET subscriber:entry::1002:guangting.com username 1002 domain guangting.com password test1234 ha1 d3185a9b956e3570ffecc0912d7f5fe1 ha1b a7c05bc9c00dea45b2bf017b4419088b rpid ""

@@ -1,0 +1,2 @@
+hash_entry/int,hash_id/int,callid/string,from_uri/string,from_tag/string,to_uri/string,to_tag/string,caller_cseq/string,callee_cseq/string,caller_route_set/string,callee_route_set/string,caller_contact/string,callee_contact/string,caller_sock/string,callee_sock/string,state/int,start_time/int,timeout/int,sflags/int,toroute_name/string,req_first_method/string,req_first_cseq/string,req_first_contact/string,req_first_fromtag/string,req_first_totag/string
+7

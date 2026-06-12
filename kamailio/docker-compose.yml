@@ -1,0 +1,60 @@
+services:
+  kamailio:
+    image: ghcr.io/kamailio/kamailio-ci:6.0.5
+    container_name: kamailio
+    restart: unless-stopped
+    depends_on:
+      rtpengine:
+        condition: service_started
+      redis:
+        condition: service_started
+    ports:
+      - "6060:6060/udp"
+      - "6060:6060/tcp"
+      - "8080:8080/tcp"
+    volumes:
+      - ./kamailio/config/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+      - ./kamailio/config/db_redis:/usr/share/kamailio/db_redis/kamailio:ro
+    networks:
+      sipnet:
+        ipv4_address: 172.28.0.10
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass redis_local_123
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      sipnet:
+        ipv4_address: 172.28.0.30
+
+  rtpengine:
+    image: jambonz/rtpengine:latest
+    container_name: rtpengine
+    restart: unless-stopped
+    entrypoint: [""]
+    command:
+      - sh
+      - -c
+      - exec rtpengine --interface=172.28.0.20!47.102.138.5 --listen-ng=172.28.0.20:22222 --port-min=10000 --port-max=10100 -L 6 --log-level-control=7 -E -f --dtls-passive
+    ports:
+      - "22222:22222/udp"
+      - "22222:22222/tcp"
+      - "10000-10100:10000-10100/udp"
+    networks:
+      sipnet:
+        ipv4_address: 172.28.0.20
+
+volumes:
+  redis-data:
+
+networks:
+  sipnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

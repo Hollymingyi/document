@@ -1,0 +1,390 @@
+#!KAMAILIO
+#
+# Kamailio config — WebRTC SIP registration + Redis state sync
+#
+
+####### Substitution Defines #########
+#!substdef "!SIP_IP!192.168.0.81!g"
+#!substdef "!SIP_DOMAIN!guangting.com!g"
+#!substdef "!REDIS_HOST!47.102.138.5!g"
+#!substdef "!REDIS_PORT!6379!g"
+#!substdef "!REDIS_PASS!redis_iCYaBJ!g"
+
+####### Global Parameters #########
+
+debug=3
+log_stderror=yes
+
+memdbg=5
+memlog=5
+
+tcp_connection_lifetime=3605
+tcp_accept_no_cl=yes
+
+dns_try_ipv6=no
+
+enable_tls=no
+
+listen=udp:172.28.0.10:6060
+listen=tcp:172.28.0.10:6060
+listen=tcp:172.28.0.10:8080
+
+children=8
+
+alias=SIP_DOMAIN
+alias=SIP_IP
+
+####### Modules Section #########
+
+loadmodule "kex.so"
+loadmodule "corex.so"
+loadmodule "tm.so"
+loadmodule "tmx.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "pv.so"
+loadmodule "maxfwd.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "textops.so"
+loadmodule "textopsx.so"
+loadmodule "siputils.so"
+loadmodule "xlog.so"
+loadmodule "sanity.so"
+loadmodule "ctl.so"
+loadmodule "cfg_rpc.so"
+loadmodule "acc.so"
+loadmodule "auth.so"
+loadmodule "auth_db.so"
+loadmodule "db_redis.so"
+loadmodule "ndb_redis.so"
+loadmodule "dialog.so"
+loadmodule "xhttp.so"
+loadmodule "websocket.so"
+# tls.so segfault on Alpine+OpenSSL3 CI images; use nginx for WSS
+# loadmodule "tls.so"
+loadmodule "nathelper.so"
+loadmodule "rtpengine.so"
+loadmodule "sqlops.so"
+loadmodule "path.so"
+
+####### Module Parameters #########
+
+# -- db_redis --
+modparam("db_redis", "db_pass", "REDIS_PASS")
+modparam("db_redis", "schema_path", "/usr/share/kamailio/db_redis/kamailio")
+modparam("db_redis", "keys", "version=entry:table_name")
+modparam("db_redis", "keys", "location=entry:ruid&usrdom:username,domain&timer:partition,keepalive")
+modparam("db_redis", "keys", "subscriber=entry:username,domain")
+modparam("db_redis", "keys", "dialog=entry:hash_entry,hash_id&cid:callid")
+modparam("db_redis", "keys", "dialog_vars=entry:hash_entry,hash_id,dialog_key&dialog:hash_entry,hash_id")
+
+# -- usrloc: registrations in Redis db 5 --
+modparam("usrloc", "db_url", "redis://default@REDIS_HOST:REDIS_PORT/5")
+modparam("usrloc", "db_mode", 3)
+modparam("usrloc", "use_domain", 1)
+modparam("usrloc", "expires_type", 1)
+modparam("usrloc", "handle_lost_tcp", 1)
+
+# -- auth_db: subscriber auth from Redis db 6 --
+modparam("auth_db", "db_url", "redis://default@REDIS_HOST:REDIS_PORT/6")
+modparam("auth_db", "calculate_ha1", 1)
+modparam("auth_db", "password_column", "password")
+modparam("auth_db", "use_domain", 1)
+
+# -- dialog: call state in Redis db 7 --
+modparam("dialog", "db_url", "redis://default@REDIS_HOST:REDIS_PORT/7")
+modparam("dialog", "db_mode", 1)
+modparam("dialog", "enable_stats", 1)
+modparam("dialog", "hash_size", 4096)
+modparam("dialog", "detect_spirals", 0)
+modparam("dialog", "default_timeout", 3600)
+
+# -- ndb_redis: direct Redis db 0 for custom agent state --
+modparam("ndb_redis", "server", "name=main;addr=REDIS_HOST;port=REDIS_PORT;db=0;pass=REDIS_PASS")
+
+# -- tls (disabled: Alpine CI image segfault with OpenSSL 3) --
+# modparam("tls", "config", "/etc/kamailio/tls.cfg")
+
+# -- nathelper --
+modparam("nathelper", "received_avp", "$avp(RECEIVED)")
+modparam("usrloc", "nat_bflag", 6)
+
+# -- rtpengine --
+modparam("rtpengine", "rtpengine_sock", "udp:172.28.0.20:22222")
+modparam("rtpengine", "rtpengine_disable_tout", 20)
+modparam("rtpengine", "rtpengine_tout_ms", 1000)
+modparam("rtpengine", "rtpengine_retr", 2)
+
+# -- acc --
+modparam("acc", "early_media", 0)
+modparam("acc", "report_cancels", 1)
+modparam("acc", "detect_direction", 1)
+
+# -- registrar --
+# max_contacts=0: 不限制每分机注册数，同终端重注册会刷新
+modparam("registrar", "max_contacts", 0)
+modparam("registrar", "use_path", 1)
+modparam("registrar", "path_mode", 0)
+
+####### Routing Logic #########
+
+request_route {
+
+    if (!mf_process_maxfwd_header("10")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+
+    if (!sanity_check("1511", "7")) {
+        xlog("Malformed SIP message from $si:$sp\n");
+        exit;
+    }
+
+    # NAT detection
+    if (nat_uac_test("64")) {
+        xlog("L_INFO", "NAT detected: source=$si:$sp, transport=$proto\n");
+        if (is_method("REGISTER")) {
+            fix_nated_register();
+        } else {
+            fix_nated_contact();
+        }
+        setbflag(6);
+    }
+
+    # CANCEL processing
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            route(relay);
+        }
+        exit;
+    }
+
+    # In-dialog requests
+    if (has_totag()) {
+        if (!loose_route()) {
+            if (is_method("ACK")) {
+                if (t_check_trans()) {
+                    t_relay();
+                    exit;
+                } else {
+                    exit;
+                }
+            }
+            sl_send_reply("404", "Not here");
+            exit;
+        }
+
+        if (is_method("BYE")) {
+            $var(caller) = $(fu{uri.user});
+            if ($var(caller) != $null) {
+                redis_cmd("main", "SET qingxia:agent:status:$var(caller) online", "r");
+            }
+            rtpengine_delete();
+        }
+
+        if (is_method("NOTIFY")) {
+            record_route();
+        }
+
+        # re-INVITE within dialog
+        if (is_method("INVITE") && has_body("application/sdp")) {
+            rtpengine_manage("replace-origin transport-protocol=RTP/SAVPF SDES-off ICE=force rtcp-mux-offer");
+            t_on_reply("RTPENGINE_REPLY");
+        }
+
+        route(relay);
+        exit;
+    }
+
+    # ACK without tag
+    if (is_method("ACK")) {
+        if (t_check_trans()) {
+            t_relay();
+            exit;
+        }
+        exit;
+    }
+
+    # Record-route for dialog-forming requests
+    if (is_method("INVITE|SUBSCRIBE")) {
+        record_route();
+    }
+
+    # Accounting
+    if (is_method("INVITE")) {
+        setflag(1);
+    }
+
+    # REGISTER handling
+    if (is_method("REGISTER")) {
+        route(REGISTER);
+        exit;
+    }
+
+    # OPTIONS keepalive
+    if (is_method("OPTIONS")) {
+        if (is_myself("$rd")) {
+            sl_send_reply("200", "OK");
+        } else {
+            sl_send_reply("403", "Forbidden");
+        }
+        exit;
+    }
+
+    # Intra-domain routing
+    if (!is_myself("$rd")) {
+        sl_send_reply("403", "Relay Forbidden");
+        exit;
+    }
+
+    # SUBSCRIBE handling
+    if (is_method("SUBSCRIBE")) {
+        sl_send_reply("501", "Not Implemented");
+        exit;
+    }
+
+    # Save original callee before lookup rewrites R-URI
+    $var(callee_orig) = $rU;
+
+    # Lookup local targets
+    if (!lookup("location")) {
+        $var(rc) = $rc;
+        route(TOVOICEMAIL);
+        t_newtran();
+        switch ($var(rc)) {
+            case -1:
+            case -3:
+                send_reply("404", "Not Found");
+                exit;
+            case -2:
+                send_reply("405", "Not Found");
+                exit;
+        }
+    }
+
+    # INVITE with dialog tracking
+    if (is_method("INVITE")) {
+        $var(caller) = $(fu{uri.user});
+        $var(callee) = $(ru{uri.user});
+        redis_cmd("main", "SET qingxia:agent:status:$var(caller) busy", "r");
+        dlg_manage();
+
+        # rtpengine SDP negotiation
+        if (has_body("application/sdp")) {
+            if (!rtpengine_manage("replace-origin transport-protocol=RTP/SAVPF SDES-off ICE=force rtcp-mux-offer")) {
+                xlog("L_WARN", "rtpengine_manage FAILED for call $ci\n");
+            }
+        }
+        t_on_reply("RTPENGINE_REPLY");
+    }
+
+    route(relay);
+}
+
+route[REGISTER] {
+    if (!auth_check("$fd", "subscriber", "1")) {
+        auth_challenge("$fd", "0");
+        exit;
+    }
+
+    # Add Path header for WebSocket clients so relay can route back
+    # Manually set received AVP for WebSocket clients (fix_nated_register may not store to db_redis)
+    if ($proto == "ws" || $proto == "wss") {
+        $avp(RECEIVED) = "sip:" + $si + ":" + $sp + ";transport=ws";
+        xlog("L_INFO", "Set received AVP: $avp(RECEIVED)\n");
+    }
+
+    if (!save("location")) {
+        sl_reply_error();
+        exit;
+    }
+
+    # Sync agent status to Redis db 0
+    $var(ext) = $fU;
+    if ($var(ext) != $null) {
+        redis_cmd("main", "SET qingxia:agent:status:$var(ext) online", "r");
+        redis_cmd("main", "SET qingxia:agent:contact:$var(ext) $ct", "r");
+        # Store WebSocket source for relay routing
+        if ($proto == "ws" || $proto == "wss") {
+            redis_cmd("main", "SET qingxia:agent:wssrc:$var(ext) $si:$sp", "r");
+        }
+        xlog("REGISTER: extension $var(ext) online, contact=$ct\n");
+    }
+
+    exit;
+}
+
+route[relay] {
+    if (isbflagset(6)) {
+        if (!add_rr_param(";r2=on")) {
+            xlog("Failed to add rr param\n");
+        }
+    }
+
+    # Handle WebSocket contacts: use stored source for destination URI
+    if ($(ru{uri.param,transport}) == "ws" || $(ru{uri.param,transport}) == "wss") {
+        $var(wsuser) = $var(callee_orig);
+        redis_cmd("main", "GET qingxia:agent:wssrc:$var(wsuser)", "rv");
+        if ($redis(rv=>type) == 1) {
+            $du = "sip:" + $redis(rv=>value) + ";transport=ws";
+            xlog("L_WARN", "WebSocket relay: du=$du\n");
+            force_send_socket(tcp:172.28.0.10:8080);
+        } else {
+            xlog("L_WARN", "No WebSocket source found for $var(wsuser)\n");
+        }
+    }
+
+    if (!t_relay()) {
+        sl_reply_error();
+    }
+    exit;
+}
+
+route[TOVOICEMAIL] {
+    return;
+}
+
+event_route[dialog:start] {
+    xlog("DIALOG START: callid=$dlg(callid) from=$dlg(from_uri) to=$dlg(to_uri)\n");
+}
+
+event_route[dialog:end] {
+    xlog("DIALOG END: callid=$dlg(callid)\n");
+    rtpengine_delete();
+    $var(from_user) = $(dlg(from_uri){uri.user});
+    if ($var(from_user) != $null) {
+        redis_cmd("main", "SET qingxia:agent:status:$var(from_user) online", "r");
+    }
+}
+
+event_route[usrloc:contact-expired] {
+    $var(aor) = $ulc(exp=>aor);
+    $var(ext) = $(var(aor){s.select,0,@});
+    if ($var(ext) != $null) {
+        redis_cmd("main", "SET qingxia:agent:status:$var(ext) offline", "r");
+        redis_cmd("main", "DEL qingxia:agent:contact:$var(ext)", "r");
+        xlog("CONTACT EXPIRED: extension $var(ext) offline\n");
+    }
+}
+
+event_route[websocket:connection-closed] {
+    xlog("WebSocket connection closed from $si:$sp\n");
+}
+
+# Handle 200 OK / 18x responses — rewrite SDP answer from WebRTC
+onreply_route[RTPENGINE_REPLY] {
+    if (has_body("application/sdp")) {
+        rtpengine_manage("replace-origin");
+    }
+}
+
+# WebSocket upgrade via HTTP
+event_route[xhttp:request] {
+    if ($hdr(Upgrade) =~ "^[Ww][Ee][Bb][Ss][Oo][Cc][Kk][Ee][Tt]$" && $hdr(Connection) =~ "[Uu][Pp][Gg][Rr][Aa][Dd][Ee]" && $rm == "GET") {
+        ws_handle_handshake();
+        exit;
+    }
+    xhttp_reply("200", "OK", "text/html", "<html><body>Kamailio OK</body></html>");
+    exit;
+}
